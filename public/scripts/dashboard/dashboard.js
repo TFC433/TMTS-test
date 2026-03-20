@@ -1,0 +1,183 @@
+/**
+ * public/scripts/dashboard/dashboard.js
+ * @version 3.3.0 (Phase 8.10 - Mutation-Driven Stale Refresh Strategy)
+ * @date 2026-03-12
+ * @description Dashboard UI Controller. 
+ * * [Performance Fix] Removed redundant client-side fetch of /api/interactions/all. 
+ * * effectiveLastActivity is now strictly sourced from backend SQL aggregation with strict null/NaN guarding.
+ * * [Performance Fix] Added SPA loaded flag setter to prevent redundant re-fetches on route navigation.
+ * * [Architecture Fix] Added markStale() to support mutation-driven dashboard invalidation without breaking fast SPA navigation.
+ */
+
+const dashboardManager = {
+    // 狀態變數
+    kanbanRawData: {},
+    processedOpportunities: [], 
+    availableYears: [], 
+
+    /**
+     * 標記儀表板資料為過期 (Stale)
+     * 當發生會影響統計的資料變更 (如新增/編輯/刪除事件) 時呼叫此函式，
+     * 使得下次進入儀表板時能觸發重新整理，而不破壞 SPA 快速切換的機制。
+     */
+    markStale() {
+        if (window.CRM_APP && window.CRM_APP.pageConfig && window.CRM_APP.pageConfig['dashboard']) {
+            window.CRM_APP.pageConfig['dashboard'].loaded = false;
+            console.log('⚠️ [Dashboard] 已標記為過期 (Stale)，下次進入將重新載入');
+        }
+    },
+
+    /**
+     * 初始化與刷新儀表板資料
+     * @param {boolean} force - 是否強制從後端刷新 (忽略快取)
+     */
+    async refresh(force = false) {
+        console.log(`🔄 [Dashboard] 執行儀表板刷新... (強制: ${force})`);
+        
+        // 呼叫 UI 管家顯示全域 Loading
+        if (window.DashboardUI) DashboardUI.showGlobalLoading('正在同步儀表板資料...');
+
+        const dashboardApiUrl = force ? `/api/dashboard?t=${Date.now()}` : '/api/dashboard';
+
+        try {
+            // 1. 併發請求資料 (已移除贅餘的 interactions/all 請求)
+            const [dashboardResult, announcementResult] = await Promise.all([
+                authedFetch(dashboardApiUrl),
+                authedFetch('/api/announcements')
+            ]);
+
+            if (!dashboardResult.success) throw new Error(dashboardResult.details || '獲取儀表板資料失敗');
+
+            const data = dashboardResult.data;
+            this.kanbanRawData = data.kanbanData || {};
+            
+            // 2. 資料處理：計算年份 (effectiveLastActivity 已由後端提供)
+            const allOpportunities = Object.values(this.kanbanRawData).flatMap(stage => stage.opportunities);
+            const yearSet = new Set();
+            
+            this.processedOpportunities = allOpportunities.map(item => {
+                // 安全防呆：嚴格檢查是否為 null, undefined 或 NaN，避免誤判有效數值
+                if (typeof item.effectiveLastActivity !== 'number' || Number.isNaN(item.effectiveLastActivity)) {
+                    item.effectiveLastActivity = new Date(item.lastUpdateTime || item.createdTime).getTime();
+                }
+                
+                const year = item.createdTime ? new Date(item.createdTime).getFullYear() : null;
+                item.creationYear = year;
+                if(year) yearSet.add(year);
+                
+                return item;
+            });
+            this.availableYears = Array.from(yearSet).sort((a, b) => b - a); 
+
+            // 3. 呼叫子模組進行渲染
+            
+            // A. 基礎 Widgets
+            if (window.DashboardWidgets) {
+                DashboardWidgets.renderStats(data.stats);
+                if (announcementResult.success) {
+                    DashboardWidgets.renderAnnouncements(announcementResult.data);
+                }
+                const activityWidget = document.querySelector('#activity-feed-widget .widget-content');
+                if (activityWidget) {
+                    activityWidget.innerHTML = DashboardWidgets.renderActivityFeed(data.recentActivity || []);
+                }
+            }
+
+            // B. 週間業務 (Weekly)
+            if (window.DashboardWeekly) {
+                DashboardWeekly.render(data.weeklyBusiness || [], data.thisWeekInfo);
+            }
+
+            // C. 看板 (Kanban)
+            if (window.DashboardKanban) {
+                // Fix Initialization Race Condition
+                DashboardKanban.init((forceRefresh) => this.refresh(forceRefresh));
+                
+                // 更新資料並渲染
+                DashboardKanban.update(
+                    this.processedOpportunities, 
+                    this.kanbanRawData, 
+                    this.availableYears
+                );
+            }
+
+            // D. 地圖 (Map)
+            if (window.mapManager) {
+                await window.mapManager.update();
+            }
+
+            // 標記為已載入，遵循 SPA 快取機制避免路由切換時重複請求，並清除 Stale 狀態
+            if (window.CRM_APP && window.CRM_APP.pageConfig && window.CRM_APP.pageConfig['dashboard']) {
+                window.CRM_APP.pageConfig['dashboard'].loaded = true;
+            }
+
+        } catch (error) {
+            if (error.message !== 'Unauthorized') {
+                console.error("[Dashboard] 刷新儀表板時發生錯誤:", error);
+                showNotification("儀表板刷新失敗", "error");
+            }
+        } finally {
+            if (window.DashboardUI) DashboardUI.hideGlobalLoading();
+            console.log('✅ [Dashboard] 儀表板刷新完成');
+        }
+    },
+    
+    /**
+     * 強制重新整理 (清除快取並重載)
+     */
+    forceRefresh: async function() {
+        if (window.DashboardUI) DashboardUI.showGlobalLoading('正在強制同步所有資料...');
+        let currentPageName = 'dashboard'; 
+        let currentPageParams = {};
+
+        try {
+            const currentHash = window.location.hash.substring(1);
+            if (currentHash && window.CRM_APP.pageConfig[currentHash.split('?')[0]]) {
+                const [pageName, paramsString] = currentHash.split('?');
+                currentPageName = pageName;
+                if (paramsString) {
+                    try {
+                        currentPageParams = Object.fromEntries(new URLSearchParams(paramsString));
+                        Object.keys(currentPageParams).forEach(key => {
+                            currentPageParams[key] = decodeURIComponent(currentPageParams[key]);
+                        });
+                    } catch (e) {
+                        console.warn(`[Dashboard] 解析 forceRefresh 的 URL 參數失敗: ${paramsString}`, e);
+                        currentPageParams = {};
+                    }
+                }
+            }
+            
+            await authedFetch('/api/cache/invalidate', { method: 'POST' });
+            showNotification('後端快取已清除，正在重新載入...', 'info');
+
+            Object.keys(window.CRM_APP.pageConfig).forEach(key => {
+                 if (!key.includes('-details')) { 
+                     window.CRM_APP.pageConfig[key].loaded = false;
+                 }
+            });
+
+            await this.refresh(true);
+
+            showNotification('所有資料已強制同步！正在重新整理目前頁面...', 'success');
+
+            await new Promise(resolve => setTimeout(resolve, 150));
+            await window.CRM_APP.navigateTo(currentPageName, currentPageParams, false);
+
+        } catch (error) {
+            if (error.message !== 'Unauthorized') {
+                console.error("[Dashboard] 強制刷新失敗:", error);
+                showNotification("強制刷新失敗，請稍後再試。", "error");
+            }
+            if (window.DashboardUI) DashboardUI.hideGlobalLoading();
+        } finally {
+            if (window.DashboardUI) DashboardUI.hideGlobalLoading();
+        }
+    }
+};
+
+window.dashboardManager = dashboardManager;
+
+if (typeof CRM_APP === 'undefined') {
+    window.CRM_APP = { systemConfig: {} };
+}
