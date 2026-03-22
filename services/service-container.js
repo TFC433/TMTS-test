@@ -4,10 +4,9 @@
 /**
  * services/service-container.js
  * 服務容器 (IoC Container)
- * @version 9.4.0
- * @date 2026-03-21
+ * @version 9.3.4
+ * @date 2026-03-18
  * @changelog
- * - [V9.4.0] Instantiated ContactService with systemService injection for Fallback Auto-Tag requirements.
  * - [PATCH] Enforced architectural rule: InteractionService is the single authoritative entry point for interaction creation. Removed deprecated `interactionWriter` from exported services. Cleaned up stale DI comments.
  * - [PATCH] Updated dependency injection: replaced interactionWriter with interactionService for OpportunityService and CompanyService to unify interaction logging entry point.
  * - [PHASE 9.3.2] Injected contactSqlWriter into OpportunityService for SQL-safe contact scaffolding.
@@ -84,7 +83,7 @@ let services = null;
 async function initializeServices() {
     if (services) return services;
 
-    console.log('🚀 [System] 正在初始化 Service Container (v9.4.0 SQL-Only CORE)...');
+    console.log('🚀 [System] 正在初始化 Service Container (v9.3.4 SQL-Only CORE)...');
 
     try {
         // 1. Infrastructure
@@ -152,7 +151,6 @@ async function initializeServices() {
             companySqlReader      
         );
 
-        // [V9.4.0] Added explicit injection of systemService to allow safe execution of Fallback Auto-Tag
         const contactService = new ContactService(
             contactRawReader, // explicit RAW
             contactSqlReader, // contactCoreReader => SQL Official
@@ -160,9 +158,7 @@ async function initializeServices() {
             companySqlReader, 
             config,
             contactSqlReader,
-            contactSqlWriter,
-            companySqlReader, // Passed implicitly previously
-            systemService     // Required for strict deterministic settings resolution
+            contactSqlWriter
         );
 
         const companyService = new CompanyService(

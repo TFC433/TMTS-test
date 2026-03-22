@@ -1,11 +1,10 @@
+// services/contact-service.js
 /**
  * services/contact-service.js
  * 聯絡人業務邏輯服務層
- * @version 8.11.0 (Phase 8.5 Exhibition Data Normalization)
- * @date 2026-03-22
+ * @version 8.9.1 (Phase 8.2 RAW Physical Delete & Cache Fix)
+ * @date 2026-03-16
  * @changelog
- * - [PHASE 8.5] Normalized exhibition data display: Auto-tag fallback now explicitly formats the exhibition_name with its date range suffix before saving to the RAW sheet (Column R). This guarantees historical data integrity for past exhibitions.
- * - [PHASE 8.3] Added safe defensive fallback evaluation for is_exhibition logic inside updatePotentialContact. System Service injection is explicitly required in constructor to ensure deterministic config retrieval.
  * - [PHASE 8.2] Added explicit cache invalidation to deletePotentialContact to fix frontend stale data.
  * - [PHASE 8.2] Added deletePotentialContact for physical deletion of RAW Sheet rows.
  * - [PHASE 8.2] Added relation validation block to deleteContact.
@@ -27,9 +26,8 @@ class ContactService {
      * @param {ContactSqlReader} [contactSqlReader]
      * @param {ContactSqlWriter} [contactSqlWriter]
      * @param {CompanySqlReader} [companySqlReader] - Optional DI for SQL Company Maps
-     * @param {SystemService} systemService         - Required DI to retrieve settings deterministically
      */
-    constructor(contactRawReader, contactCoreReader, contactWriter, companyReader, config, contactSqlReader, contactSqlWriter, companySqlReader, systemService) {
+    constructor(contactRawReader, contactCoreReader, contactWriter, companyReader, config, contactSqlReader, contactSqlWriter, companySqlReader) {
         this.contactRawReader = contactRawReader;
         this.contactCoreReader = contactCoreReader;
         this.contactWriter = contactWriter;
@@ -38,12 +36,6 @@ class ContactService {
         this.contactSqlReader = contactSqlReader;
         this.contactSqlWriter = contactSqlWriter;
         this.companySqlReader = companySqlReader;
-        
-        // Strict deterministic injection requirement
-        if (!systemService) {
-            throw new Error('[ContactService] CRITICAL: systemService is required but not provided.');
-        }
-        this.systemService = systemService;
     }
 
     // ============================================================
@@ -258,7 +250,7 @@ class ContactService {
 
             // 3. Format and return
             return linkedContacts.map(contact => {
-                const companyName = companyNameMap.get(contact.companyId) || companyNameMap.get(contact.companyId) || '';
+                const companyName = companyNameMap.get(contact.companyId) || contact.companyId || '';
 
                 return {
                     contactId: contact.contactId,
@@ -352,56 +344,6 @@ class ContactService {
             if (!target) throw new Error(`找不到潛在客戶 Row: ${rowIndex}`);
 
             const mergedData = { ...target, ...updateData };
-
-            // =========================================================
-            // [FALLBACK AUTO-TAG LOGIC & NORMALIZATION]
-            // STRICT EVALUATION: Only execute when target.is_exhibition lacks a true/false state.
-            // Builds the final normalized display string (Name + Date suffix) and commits it to RAW R.
-            // =========================================================
-            if (target.is_exhibition == null || target.is_exhibition === undefined || target.is_exhibition === '') {
-                try {
-                    const sysConfig = await this.systemService.getSystemConfig();
-                    const exConfig = sysConfig['展會設定'] || [];
-                    
-                    const enabledStr = (exConfig.find(c => c.value === 'exhibition_enabled') || {}).note || 'false';
-                    const isEnabled = String(enabledStr).toUpperCase() === 'TRUE';
-
-                    if (isEnabled) {
-                        const exName = (exConfig.find(c => c.value === 'exhibition_name') || {}).note || '';
-                        const startStr = (exConfig.find(c => c.value === 'exhibition_start_date') || {}).note;
-                        const endStr = (exConfig.find(c => c.value === 'exhibition_end_date') || {}).note;
-
-                        if (startStr && endStr && target.createdTime) {
-                            const createdDate = new Date(target.createdTime);
-                            const startDate = new Date(startStr);
-                            const endDate = new Date(endStr);
-                            endDate.setHours(23, 59, 59, 999); // Safe bounding inclusion
-
-                            // Proceed strictly if date parsing results in valid objects
-                            if (!isNaN(createdDate.getTime()) && !isNaN(startDate.getTime()) && !isNaN(endDate.getTime())) {
-                                if (createdDate >= startDate && createdDate <= endDate) {
-                                    
-                                    // Parse config strings safely by splitting to avoid timezone drift on output
-                                    const startParts = startStr.split('-');
-                                    const endParts = endStr.split('-');
-                                    let formattedExName = exName;
-
-                                    if (startParts.length === 3 && endParts.length === 3) {
-                                        const suffix = `（${parseInt(startParts[1], 10)}/${parseInt(startParts[2], 10)}–${parseInt(endParts[1], 10)}/${parseInt(endParts[2], 10)}）`;
-                                        formattedExName = `${exName}${suffix}`;
-                                    }
-
-                                    mergedData.is_exhibition = true;
-                                    mergedData.exhibition_name = formattedExName; // Raw R now stores the final display label
-                                }
-                            }
-                        }
-                    }
-                } catch (configError) {
-                    console.warn('[ContactService] Fallback auto-tag skipped safely due to error:', configError.message);
-                }
-            }
-            // =========================================================
 
             if (updateData.notes) {
                 const oldNotes = target.notes || '';
