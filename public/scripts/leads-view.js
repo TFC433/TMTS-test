@@ -1,10 +1,12 @@
 // File: public/scripts/leads-view.js
-// Version: 15.6.0
-// Date: 2026-03-20
+// Version: 16.10.0
+// Date: 2026-03-22
 // Changelog: 
-//   - V15.6.0 UI/UX Patch: Fixed mobile modal close, decoupled modal dismissal, added preview from edit modal, injected logout button, smoothed login UX with 'verifying' state, and added pending reminder.
-//   - V15.5.0 Reliable Auth Fallback: Fixed 401 manual re-entry by utilizing liff.logout() + reload to clear stale LIFF state. Reverted UI header state on auth failure.
-//   - V15.4.0 Strict Auth Flow Redesign: Completely removed auto-login loop mechanisms. Implemented explicit manual fallback state on 401.
+//   - V16.10.0 Delete Feature: Added handleDeleteSubmit and delete button visibility toggling based on card ownership.
+//   - V16.9.0 Exhibition UI Cleanup: Surgically removed the legacy exhibition badge (pill) to eliminate visual clutter and ghosting. The visual system now strictly relies on the Corner Triangle (mode) and Bottom Info Bar (information) without redundancy.
+//   - V16.8.0 Exhibition UI Theming: Added dynamic color and opacity injection from System Config for the exhibition corner triangle and bottom info bar. Implemented robust hexToRgba helper and safe fallbacks to guarantee UI stability.
+//   - V16.7.0 Exhibition Display Normalization: Stopped frontend date reconstruction for exhibition labels. The bottom info bar now purely renders the pre-formatted label from RAW column R, ensuring future/historical data integrity and multi-exhibition support without drift.
+//   - V16.6.0 Exhibition UX Polish: Fine-tuned corner triangle mode indicator (size, color, text centering) and bottom info bar (centered text, softer backdrop blur, integrated date range formatting) for a balanced, production-ready visual finish.
 // Description: Logic controller for Lead View V6.3 (Reading Structure + Desktop Pill Position) and simplified strict LIFF Auth.
 
 let allLeads = [];
@@ -14,6 +16,10 @@ let currentUser = {
     pictureUrl: null
 };
 let currentView = 'all'; 
+
+// [Phase 8.4 Exhibition UX] Independent filter state and globally stored config
+let showExhibitionOnly = false;
+let currentExhibitionConfig = null;
 
 document.addEventListener('DOMContentLoaded', async () => {
     // [ITEM 5] Start with a neutral verifying state instead of jarring login prompt
@@ -263,6 +269,9 @@ function bindEvents() {
 
     const editForm = document.getElementById('edit-form');
     if (editForm) editForm.onsubmit = handleEditSubmit;
+
+    const deleteBtn = document.getElementById('delete-lead-btn');
+    if (deleteBtn) deleteBtn.onclick = handleDeleteSubmit;
 }
 
 async function getValidIdToken() {
@@ -279,6 +288,134 @@ async function getValidIdToken() {
 
     return token;
 }
+
+// ============================================================================
+// [Phase 8.4/16.8.0] Exhibition Feature Methods
+// Contextual Mode Banner & Dynamic UI Theming
+// ============================================================================
+
+// Helper: Converts HEX to RGBA safely for dynamic theme injection
+function hexToRgba(hex, opacity) {
+    if (!hex || typeof hex !== 'string') return null;
+    hex = hex.replace('#', '');
+    if (hex.length !== 6) return null;
+    
+    const r = parseInt(hex.substring(0, 2), 16);
+    const g = parseInt(hex.substring(2, 4), 16);
+    const b = parseInt(hex.substring(4, 6), 16);
+    
+    if (isNaN(r) || isNaN(g) || isNaN(b)) return null;
+    
+    const alpha = (opacity !== undefined && opacity !== null && opacity !== '') 
+        ? parseFloat(opacity) 
+        : 1;
+        
+    if (isNaN(alpha)) return null;
+    
+    return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
+function isExhibitionActive(config) {
+    if (!config || String(config.exhibition_enabled).toUpperCase() !== 'TRUE') return false;
+    
+    if (!config.exhibition_start_date || !config.exhibition_end_date) return false;
+
+    // Use simple, normalized local date comparison to avoid timezone drift
+    const now = new Date();
+    // Reset time portions for strict date boundary comparison
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    
+    // Parse the config dates (assuming YYYY-MM-DD format)
+    const startDateParts = config.exhibition_start_date.split('-');
+    const endDateParts = config.exhibition_end_date.split('-');
+    
+    if (startDateParts.length !== 3 || endDateParts.length !== 3) return false;
+
+    const start = new Date(startDateParts[0], startDateParts[1] - 1, startDateParts[2]);
+    const end = new Date(endDateParts[0], endDateParts[1] - 1, endDateParts[2]);
+    
+    if (isNaN(start.getTime()) || isNaN(end.getTime())) return false;
+
+    return today >= start && today <= end;
+}
+
+function renderExhibitionBanner() {
+    const existingBanner = document.getElementById('exhibition-info-banner');
+    if (existingBanner) existingBanner.remove();
+
+    // Clean up old standalone pill if it exists
+    const oldPill = document.getElementById('exhibition-filter-pill');
+    if (oldPill) oldPill.remove();
+
+    if (!isExhibitionActive(currentExhibitionConfig)) return;
+
+    const startDateParts = currentExhibitionConfig.exhibition_start_date.split('-');
+    const endDateParts = currentExhibitionConfig.exhibition_end_date.split('-');
+    
+    // Format to M/D safely
+    const startMD = `${parseInt(startDateParts[1], 10)}/${parseInt(startDateParts[2], 10)}`;
+    const endMD = `${parseInt(endDateParts[1], 10)}/${parseInt(endDateParts[2], 10)}`;
+    const exName = (currentExhibitionConfig.exhibition_name || '').replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+    // Create banner DOM
+    const bannerEl = document.createElement('div');
+    bannerEl.id = 'exhibition-info-banner';
+    // Two-line contextual mode styling: Light blue tint, strong left border, compact flex-column.
+    bannerEl.style.cssText = 'background-color: #f0f9ff; border: 1px solid #bae6fd; border-left: 4px solid #0ea5e9; border-radius: 8px; padding: 10px 12px; margin-bottom: 12px; display: flex; flex-direction: column; gap: 4px; width: 100%; box-sizing: border-box;';
+    
+    bannerEl.innerHTML = `
+        <div style="display: flex; justify-content: space-between; align-items: center; width: 100%;">
+            <div style="font-weight: 600; color: #0f172a; font-size: 0.85rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding-right: 8px;">
+                📢 ${exName} 期間（${startMD} - ${endMD}）
+            </div>
+            <div style="flex-shrink: 0;">
+                <span id="inline-exhibition-toggle" style="color: #0284c7; cursor: pointer; font-weight: 600; font-size: 0.8rem; padding: 4px 8px; border-radius: 4px; transition: background 0.2s;">
+                    EXPO名片
+                </span>
+            </div>
+        </div>
+        <div style="font-size: 0.75rem; color: #64748b; line-height: 1.2;">
+            本期間掃描的名片將自動標記為展示會名片
+        </div>
+    `;
+
+    // Inject INSIDE the already-sticky controls-section at the very top (prepend)
+    const controlsContainer = document.querySelector('.controls-section');
+    if (controlsContainer) {
+        controlsContainer.prepend(bannerEl);
+    } else {
+        // Fallback injection if controls-section is missing structurally
+        const gridContainer = document.getElementById('leads-grid');
+        if (gridContainer && gridContainer.parentNode) {
+            gridContainer.insertAdjacentElement('beforebegin', bannerEl);
+        }
+    }
+
+    // Attach inline toggle event
+    const toggleBtn = bannerEl.querySelector('#inline-exhibition-toggle');
+    if (toggleBtn) {
+        toggleBtn.onclick = function() {
+            showExhibitionOnly = !showExhibitionOnly;
+            renderLeads();
+        };
+    }
+}
+
+// Minimal inline text update for the toggle
+function updateExhibitionInlineToggle(count) {
+    const toggleBtn = document.getElementById('inline-exhibition-toggle');
+    if (!toggleBtn) return;
+
+    if (showExhibitionOnly) {
+        toggleBtn.textContent = `顯示全部`;
+        toggleBtn.style.backgroundColor = '#e0f2fe'; // subtle active state
+    } else {
+        toggleBtn.textContent = `EXPO名片`;
+        toggleBtn.style.backgroundColor = 'transparent';
+    }
+}
+// ============================================================================
+
 
 async function loadLeadsData() {
     const loadingEl = document.getElementById('loading-indicator');
@@ -325,6 +462,13 @@ async function loadLeadsData() {
 
         if (result.success) {
             allLeads = result.data;
+            
+            // Extract config from payload and initialize UI enhancements safely
+            if (result.exhibitionConfig) {
+                currentExhibitionConfig = result.exhibitionConfig;
+                renderExhibitionBanner();
+            }
+
             if(loadingEl) loadingEl.style.display = 'none';
             if(gridEl) gridEl.style.display = 'flex'; 
             updateCounts();
@@ -382,15 +526,27 @@ function renderLeads() {
         const hasCompany = lead.company && lead.company.trim() !== '';
         const isPending = !hasName || !hasCompany;
 
+        // Core state machine evaluation
         if (currentView === 'mine' && lead.lineUserId !== currentUser.userId) return false;
         if (currentView === 'pending' && !isPending) return false;
 
+        // Search text evaluation
         if (searchTerm) {
             const text = `${lead.name} ${lead.company} ${lead.position}`.toLowerCase();
-            return text.includes(searchTerm);
+            if (!text.includes(searchTerm)) return false;
         }
+
+        // Layered Boolean Evaluation for Exhibition Filter
+        if (showExhibitionOnly) {
+            const isEx = lead.is_exhibition === true || String(lead.is_exhibition).toUpperCase() === 'TRUE';
+            if (!isEx) return false;
+        }
+
         return true;
     });
+
+    // Update the inline toggle state
+    updateExhibitionInlineToggle(filtered.length);
 
     if (filtered.length === 0) {
         grid.style.display = 'none';
@@ -436,6 +592,33 @@ function createCardHTML(lead) {
         ? `<img src="${imageUrl}" alt="名片" loading="lazy" onerror="this.style.display='none'; this.parentElement.innerHTML='<div class=\\'placeholder\\'>📇</div>';">`
         : `<div class="placeholder">📇</div>`;
 
+    const isExhibition = lead.is_exhibition === true || String(lead.is_exhibition).toUpperCase() === 'TRUE';
+    
+    // Dynamic Theming: Safe default colors
+    let triangleBgColor = 'rgba(37, 99, 235, 0.85)';
+    let bottomBarBgColor = 'rgba(15, 23, 42, 0.4)';
+    
+    // Dynamic Theming: Override with system config if valid HEX/opacity is present
+    if (isExhibition && currentExhibitionConfig) {
+        const customTriangle = hexToRgba(currentExhibitionConfig.exhibition_triangle_color, currentExhibitionConfig.exhibition_triangle_opacity);
+        if (customTriangle) triangleBgColor = customTriangle;
+        
+        const customBar = hexToRgba(currentExhibitionConfig.exhibition_bar_color, currentExhibitionConfig.exhibition_bar_opacity);
+        if (customBar) bottomBarBgColor = customBar;
+    }
+    
+    // 1) Corner Triangle Tag (Fixed Mode Indicator) - Colors dynamically injected
+    const exhibitionCornerTagHtml = isExhibition
+        ? `<div style="position: absolute; top: 0; left: 0; width: 44px; height: 44px; background: ${triangleBgColor}; clip-path: polygon(0 0, 100% 0, 0 100%); z-index: 9; pointer-events: none;">
+               <span style="position: absolute; top: 5px; left: 6px; color: white; font-size: 12px; font-weight: 700; line-height: 1;">展</span>
+           </div>`
+        : '';
+
+    // 2) Bottom Info Bar (Primary readable info) - Colors dynamically injected, displaying normalized label from RAW R
+    const exhibitionBottomBarHtml = isExhibition && lead.exhibition_name
+        ? `<div style="position: absolute; bottom: 0; left: 0; right: 0; background: ${bottomBarBgColor}; backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px); color: white; font-size: 12px; font-weight: 500; letter-spacing: 0.3px; padding: 5px 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; z-index: 9; pointer-events: none; text-align: center;">${safeHtml(lead.exhibition_name)}</div>`
+        : '';
+
     return `
         <div class="v6-list-item ${isMine ? 'is-mine' : ''}">
             <div class="image-top-right">
@@ -443,8 +626,10 @@ function createCardHTML(lead) {
                 ${showEditBtn ? `<button class="edit-pill-btn" onclick='event.stopPropagation(); openEdit(${leadJson})'>✏️ 編輯</button>` : ''}
             </div>
             
-            <div class="item-image" onclick='openPreview("${safe(lead.driveLink)}")' title="點擊看原圖">
+            <div class="item-image" onclick='openPreview("${safe(lead.driveLink)}")' title="點擊看原圖" style="position: relative;">
+                ${exhibitionCornerTagHtml}
                 ${statusBadgeHtml}
+                ${exhibitionBottomBarHtml}
                 ${imageHtml}
             </div>
             
@@ -525,6 +710,46 @@ function openEdit(lead) {
     document.getElementById('edit-mobile').value = lead.mobile || '';
     document.getElementById('edit-email').value = lead.email || '';
     document.getElementById('edit-notes').value = ''; 
+
+    // [Fallback Auto-Tag] Conditional rendering of the Exhibition control UI
+    const oldDynamicGroup = document.getElementById('dynamic-exhibition-group');
+    if (oldDynamicGroup) oldDynamicGroup.remove();
+
+    if (lead.is_exhibition != null && lead.is_exhibition !== '') {
+        const form = document.getElementById('edit-form');
+        const notesEl = document.getElementById('edit-notes');
+        
+        if (form && notesEl && notesEl.parentNode) {
+            const isChecked = lead.is_exhibition === true || String(lead.is_exhibition).toUpperCase() === 'TRUE';
+            const safeExName = (lead.exhibition_name || '').replace(/</g, "&lt;").replace(/>/g, "&gt;");
+            
+            const exGroup = document.createElement('div');
+            exGroup.id = 'dynamic-exhibition-group';
+            exGroup.className = 'form-group';
+            // Embedding hidden input to strictly preserve exhibition string payload against loss during update flow
+            exGroup.innerHTML = `
+                <input type="hidden" id="edit-exhibition-name" value="${safeExName}">
+                <label style="display: flex; align-items: center; gap: 8px; font-weight: 500; cursor: pointer; margin-bottom: 4px;">
+                    <input type="checkbox" id="edit-is-exhibition" ${isChecked ? 'checked' : ''} style="width: auto; margin: 0;">
+                    <span>設為展會名片</span>
+                </label>
+                <div style="font-size: 0.85rem; color: var(--text-sub);">展會名稱: ${safeExName || '未指定'}</div>
+            `;
+            
+            form.insertBefore(exGroup, notesEl.parentNode);
+        }
+    }
+
+    const isLocalDev = (currentUser.userId === 'TEST_LOCAL_USER');
+    const isMine = (lead.lineUserId === currentUser.userId);
+    const showDeleteBtn = isLocalDev || isMine;
+    
+    const deleteBtn = document.getElementById('delete-lead-btn');
+    if (deleteBtn) {
+        deleteBtn.style.display = showDeleteBtn ? 'block' : 'none';
+        deleteBtn.dataset.rowIndex = lead.rowIndex;
+    }
+
     modal.style.display = 'block';
 }
 
@@ -547,6 +772,14 @@ async function handleEditSubmit(e) {
     
     const notes = document.getElementById('edit-notes').value.trim();
     if (notes) data.notes = notes;
+
+    // [Fallback Auto-Tag] Safely extraction to explicitly prevent exhibition string loss
+    const exToggle = document.getElementById('edit-is-exhibition');
+    const exNameInput = document.getElementById('edit-exhibition-name');
+    if (exToggle && exNameInput) {
+        data.is_exhibition = exToggle.checked;
+        data.exhibition_name = exNameInput.value;
+    }
 
     try {
         const headers = { 
@@ -597,5 +830,73 @@ async function handleEditSubmit(e) {
     } finally {
         btn.disabled = false;
         btn.textContent = originalText;
+    }
+}
+
+async function handleDeleteSubmit(e) {
+    const rowIndex = e.target.dataset.rowIndex;
+    if (!rowIndex) return;
+
+    if (!window.confirm('確定要刪除這張名片嗎？此動作無法復原。')) {
+        return;
+    }
+
+    const deleteBtn = e.target;
+    const saveBtn = document.querySelector('#edit-form button[type="submit"]');
+    const originalDeleteText = deleteBtn.textContent;
+    
+    deleteBtn.disabled = true;
+    deleteBtn.textContent = '刪除中...';
+    if (saveBtn) saveBtn.disabled = true;
+
+    try {
+        const headers = { 'Content-Type': 'application/json' };
+
+        if (currentUser.userId === 'TEST_LOCAL_USER') {
+            headers['Authorization'] = 'Bearer TEST_LOCAL_TOKEN';
+        } else {
+            const idToken = await getValidIdToken();
+            if (!idToken) {
+                console.warn('[Auth] Missing token, skip request.');
+                deleteBtn.disabled = false;
+                deleteBtn.textContent = originalDeleteText;
+                if (saveBtn) saveBtn.disabled = false;
+                return;
+            }
+            headers['Authorization'] = `Bearer ${idToken}`;
+        }
+
+        const res = await fetch(`/api/line/leads/${rowIndex}`, {
+            method: 'DELETE',
+            headers: headers
+        });
+
+        if (res.status === 401) {
+            document.getElementById('edit-modal').style.display = 'none';
+            showAuthFailedFallback();
+            return;
+        }
+
+        if (res.status === 403 || res.status === 404) {
+            const errData = await res.json();
+            alert(errData.message || '您沒有權限執行此操作');
+            return;
+        }
+
+        const result = await res.json();
+        
+        if (result.success) {
+            alert('刪除成功！');
+            document.getElementById('edit-modal').style.display = 'none';
+            loadLeadsData();
+        } else {
+            alert('刪除失敗: ' + (result.message || result.error));
+        }
+    } catch (e) {
+        alert('網路錯誤');
+    } finally {
+        deleteBtn.disabled = false;
+        deleteBtn.textContent = originalDeleteText;
+        if (saveBtn) saveBtn.disabled = false;
     }
 }
